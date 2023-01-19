@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# Set env var if not already set
+export FLY_ORG=${FLY_ORG:-$(flyctl orgs list -j | jq -r '. | keys | reverse | .[0]')}
+
+echo -e "Deploying to Fly.io organization: $FLY_ORG\n\tuse FLY_ORG environment variable to override\n"
+
+if [ -z "$CLOUDFLARE_ZONE_ID" ]; then
+  echo "CLOUDFLARE_ZONE_ID environment variable is not set"
+  exit 1
+fi
+
+if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+  echo "CLOUDFLARE_API_TOKEN environment variable is not set"
+  exit 1
+fi
+
+export BASE_DOMAIN=$(curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID" \
+     -H "Content-Type:application/json" \
+     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r .result.name)
+
+if [ -z "$BASE_DOMAIN" ]; then
+  echo "Cannot determine BASE_DOMAIN, is CLOUDFLARE_API_TOKEN and CLOUDFLARE_ZONE_ID set correctly?"
+  exit 1
+fi
+
+echo -e "Using Base domain:\n\t$BASE_DOMAIN"
+
+# Start the Fly.io API proxy
+flyctl machines api-proxy -q -o $FLY_ORG &
+FLY_API_PROXY_PID=$!
+
+echo "Waiting for the Fly.io API proxy to start"
+until $(curl --output /dev/null --silent --head http://127.0.0.1:4280); do
+    printf '.'
+    sleep 1
+done
+
+# Set the Fly.io API token
+export FLY_API_TOKEN=$(fly auth token)
+
+export TF_VAR_org=$FLY_ORG
+export TF_VAR_zone_id=$CLOUDFLARE_ZONE_ID
+
+# Apply the Terraform configuration
+terraform "$@"
+
+kill $FLY_API_PROXY_PID
+wait
